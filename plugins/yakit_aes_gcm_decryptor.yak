@@ -1,0 +1,118 @@
+/**
+ * AES-GCM 数据包被动解密插件 for Yakit
+ *
+ * 功能：
+ * - 自动检测并解密 AES-GCM 加密的数据包
+ * - 支持 AES-256-GCM (UTF-8 密钥) 模式
+ * - 被动劫持，自动解密响应内容
+ *
+ * 安装方法：
+ * 1. Yakit -> 插件 -> 新建插件
+ * 2. 粘贴此代码
+ * 3. 保存并启用
+ *
+ * 作者: Claude
+ */
+
+// 密钥配置
+KEY_STRING = "0123456789abcdef0123456789abcdef"
+KEY_UTF8 = []byte(KEY_STRING)  // 32 bytes, AES-256
+KEY_HEX = hex.Decode(KEY_STRING) ~  // 16 bytes, AES-128
+
+// 正则匹配 base64
+reBase64 = regexp.MustCompile(`^[A-Za-z0-9+/]{20,}={0,2}$`)
+
+// 检查是否是有效的 base64 字符串
+func isBase64(data: string): bool {
+    return reBase64.MatchString(data)
+}
+
+// 尝试解密
+func decryptAESGCM(encryptedBase64: string): string {
+    // 检查是否是 base64
+    if !isBase64(encryptedBase64) {
+        return ""
+    }
+
+    // Base64 解码
+    encryptedData, err := base64.Decode(encryptedBase64)
+    if err != nil {
+        return ""
+    }
+
+    // 检查最小长度 (12 bytes nonce + 16 bytes tag + 至少 1 byte 密文)
+    if len(encryptedData) < 12 + 16 + 1 {
+        return ""
+    }
+
+    // 提取 nonce 和密文
+    nonce := encryptedData[:12]
+    ciphertextWithTag := encryptedData[12:]
+
+    if len(ciphertextWithTag) < 17 {
+        return ""
+    }
+
+    ciphertext := ciphertextWithTag[:len(ciphertextWithTag)-16]
+    tag := ciphertextWithTag[len(ciphertextWithTag)-16:]
+
+    // 尝试 AES-256-GCM (UTF-8 密钥)
+    decrypted, err := aes.GCMDecrypt(KEY_UTF8, nonce, ciphertext, tag)
+    if err == nil {
+        return string(decrypted)
+    }
+
+    // 尝试 AES-128-GCM (Hex 密钥)
+    decrypted, err = aes.GCMDecrypt(KEY_HEX, nonce, ciphertext, tag)
+    if err == nil {
+        return string(decrypted)
+    }
+
+    return ""
+}
+
+// 格式化 JSON
+func formatJSON(data: string): string {
+    obj, err := json.NewDecodeString(data)
+    if err == nil {
+        return json.NewEncoder(obj).Indent("", "  ")
+    }
+    return data
+}
+
+// HTTP 响应劫持 - 被动解密
+hijackHTTPResponse = func(isHttps, url, req, rsp, body) {
+    // 获取响应体
+    bodyStr := string(body)
+
+    // 去除空白字符
+    bodyStr = strings.TrimSpace(bodyStr)
+
+    // 尝试解密
+    decrypted := decryptAESGCM(bodyStr)
+
+    if decrypted != "" {
+        // 解密成功，输出日志
+        log.Infof("=" ~ 60)
+        log.Infof("[+] AES-GCM 解密成功!")
+        log.Infof("URL: %s", url)
+        log.Infof("-" ~ 60)
+        log.Infof("解密结果:\n%s", formatJSON(decrypted))
+
+        // 替换响应体为解密后的内容
+        // 这样在 Yakit 中可以直接看到明文
+        rsp = rsp.ReplaceBody([]byte(formatJSON(decrypted)))
+
+        // 添加标记
+        rsp = rsp.AddHeader("X-AES-GCM-Decrypted", "true")
+    }
+
+    return rsp
+}
+
+// 主函数
+func main() {
+    log.Infof("[*] AES-GCM Decryptor 插件已加载")
+    log.Infof("[*] 密钥: %s", KEY_STRING)
+    log.Infof("[*] 监听 HTTP 响应中...")
+}
